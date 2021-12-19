@@ -10,7 +10,20 @@ This is an application developed in parallel with my TUI library [ui.h](https://
 
 ![demo.gif](https://github.com/Cubified/bdfedit/blob/main/demo.gif)
 
-### Libraries
+### Compiling and Running
+
+To compile:
+
+     $ make
+
+To run:
+
+     $ ./bdfedit [font.bdf]
+
+A sample .bdf file is included in `bdf/scientifica-11.bdf`.
+
+### Libraries/Sample Font
 
 - [uthash](https://troydhanson.github.io/uthash/)
 - [vec](https://github.com/rxi/vec)
+- [scientifica](https://github.com/nerdypepper/scientifica)
