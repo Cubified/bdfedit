@@ -1,0 +1,275 @@
+/*
+ * bdfedit.c: a terminal-based font editor
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <signal.h>
+
+#include "lang.h"
+#include "ui.h"
+
+#define SCALE_FACTOR 3
+
+#define HALFW (ws.ws_col / 2)
+#define HALFH (ws.ws_row / 2)
+
+#define GLYPHW 8
+#define GLYPHH 8
+
+#define GLYPHW_ADJ (GLYPHW * SCALE_FACTOR * 2)
+#define GLYPHH_ADJ (GLYPHH * SCALE_FACTOR)
+
+#define GLYPHSTARTX_CENTER (HALFW - (GLYPHW_ADJ / 2))
+#define GLYPHSTARTY_CENTER (HALFH - (GLYPHH_ADJ / 2))
+
+#define SCREENSPACE_TO_FONTSPACE_X(x, c) ((x - c) / (SCALE_FACTOR * 2))
+#define SCREENSPACE_TO_FONTSPACE_Y(y, c) ((y - c) / SCALE_FACTOR)
+
+#define FONTSPACE_TO_SCREENSPACE_X(x, c) ((x * SCALE_FACTOR * 2) + c)
+#define FONTSPACE_TO_SCREENSPACE_Y(y, c) ((y * SCALE_FACTOR) + c)
+
+#define GLYPHS_PER_ROW (ws.ws_col / ((GLYPHW * SCALE_FACTOR * 2) + SCALE_FACTOR))
+#define VIEWSTARTX_CENTER (1 + ((ws.ws_col - (GLYPHS_PER_ROW * ((GLYPHW * SCALE_FACTOR * 2) + SCALE_FACTOR))) / 2))
+
+#define CENTER(len) (HALFW - (len / 2))
+
+enum modes {
+  VIEW,
+  EDIT,
+  PREVIEW
+};
+
+struct winsize ws;
+struct termios tio;
+
+int mode = VIEW,
+    viewmode_scroll = 0;
+
+char glyph_name = 'a';
+unsigned char glyph[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+static void paint();
+static void stop();
+
+void resize(){
+  printf("\x1b[?1049h\x1b[2J\x1b[?1003h\x1b[?25l");
+  ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
+  paint();
+}
+
+void setmode(int m){
+  mode = m;
+  ui_screen(mode);
+  paint();
+}
+
+void init(){
+  struct termios raw;
+
+  signal(SIGTERM,  stop);
+  signal(SIGQUIT,  stop);
+  signal(SIGINT,   stop);
+  signal(SIGWINCH, resize);
+
+  setvbuf(stdout, NULL, _IOFBF, 4096);
+
+  resize();
+
+  tcgetattr(STDIN_FILENO, &tio);
+  raw = tio;
+  raw.c_lflag &= ~(ECHO | ICANON);
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+
+  ui_new();
+
+  for(int i=0;i<24;i++){
+    ui_add(
+      VIEWSTARTX_CENTER,
+      (i / GLYPHS_PER_ROW) * (GLYPHH_ADJ + 2),
+      GLYPHW_ADJ, GLYPHH_ADJ,
+      VIEW,
+      genglyph,
+      viewglyph_click,
+      viewglyph_hover,
+      glyph
+    );
+  }
+}
+
+void genglyph(box *b, char *out){
+  int x, y, xp, yp, xd, yd;
+  unsigned char tmp;
+  char *g = b->data;
+
+  for(y=0;y<sizeof(g);y++){
+    x = 0;
+    tmp = g[y];
+    while(x < GLYPHW){
+      if(tmp & 0x01) sprintf(out, "\x1b[47m");
+      else sprintf(out, "\x1b[48;2;0;0;0m");
+      for(yp=0;yp<SCALE_FACTOR;yp++){
+        sprintf(out, "%.*s\n", SCALE_FACTOR*2, "                      ");
+      }
+      tmp >>= 1;
+      x++;
+    }
+  }
+}
+
+void viewglyph_click(box *b, int x, int y){
+  setmode(EDIT);
+}
+
+void viewglyph_click(box *b, int x, int y, int down){
+}
+
+void putglyph(unsigned char *glyph, int startx, int starty){
+  int x, y, xp, yp, xd, yd;
+  unsigned char tmp;
+
+  for(y=0;y<sizeof(glyph);y++){
+    x = 0;
+    tmp = glyph[y];
+    while(x < GLYPHW){
+      if(tmp & 0x01) printf("\x1b[47m");
+      else printf("\x1b[48;2;0;0;0m");
+      for(yp=0;yp<SCALE_FACTOR;yp++){
+        for(xp=0;xp<SCALE_FACTOR*2;xp++){
+          xd = FONTSPACE_TO_SCREENSPACE_X(x, startx)+xp;
+          yd = FONTSPACE_TO_SCREENSPACE_Y(y, starty)+yp;
+          if(xd > 0 && xd < ws.ws_col &&
+             yd > 0 && yd < ws.ws_row) printf("\x1b[%i;%iH ", yd, xd);
+        }
+      }
+      tmp >>= 1;
+      x++;
+    }
+  }
+  printf("\x1b[0m");
+}
+
+void paint(){
+  if(mode == VIEW){
+    int n = 100;
+    int x, y, xs, ys;
+
+    printf("\x1b[2J"); // TODO: This flickers, probably because buffer size? (4096)
+    for(y=0;y<n/GLYPHS_PER_ROW;y++){
+      for(x=0;x<GLYPHS_PER_ROW;x++){
+        xs = VIEWSTARTX_CENTER + (x * ((GLYPHW * SCALE_FACTOR * 2) + SCALE_FACTOR));
+        ys = SCALE_FACTOR - viewmode_scroll + (y * ((GLYPHH * SCALE_FACTOR) + SCALE_FACTOR));
+        if(ys > ws.ws_row) continue;
+        putglyph(
+          glyph,
+          xs, ys
+        );
+      }
+    }
+    fflush(stdout);
+  } else if(mode == EDIT){
+    printf("\x1b[%i;%iH" LANG_NOW_EDITING, GLYPHSTARTY_CENTER-2, CENTER(LANG_NOW_EDITING_LEN), glyph_name);
+    putglyph(glyph, GLYPHSTARTX_CENTER, GLYPHSTARTY_CENTER);
+    printf("\x1b[%i;%iH" LANG_NEXT_GLYPH, HALFH-1, GLYPHSTARTX_CENTER + GLYPHW_ADJ + 2, glyph_name);
+    printf("\x1b[%i;%iH" LANG_PREV_GLYPH, HALFH-1, GLYPHSTARTX_CENTER - LANG_PREV_GLYPH_LEN - 2, glyph_name);
+    fflush(stdout);
+  }
+}
+
+void draw(int x, int y){
+  glyph[y] ^= 1 << x;
+  paint();
+}
+
+void loop(){
+  char buf[64];
+  int nread, x, y, xc, yc, mouse = 0;
+
+  paint();
+
+  while((nread=read(STDIN_FILENO, buf, sizeof(buf))) > 0){
+    ui_update(buf, nread);
+
+    switch(buf[0]){
+      case '\x1b':
+        if(nread > 1 && buf[1] == '['){
+          switch(buf[2]){
+            case 'M':
+              switch(buf[3]){
+                case ' ': /* Mouse down */
+                  mouse = 1;
+                  x = (buf[4] & 0xff) - 0x20;
+                  y = (buf[5] & 0xff) - 0x20;
+                  if(mode == VIEW){
+                    xc = (x - VIEWSTARTX_CENTER) / ((GLYPHW * SCALE_FACTOR) + SCALE_FACTOR);
+                    yc = (y - SCALE_FACTOR + viewmode_scroll) / ((GLYPHH * SCALE_FACTOR) + SCALE_FACTOR);
+                    mode = EDIT;
+                    printf("\x1b[2J");
+                    paint();
+                  } else if(mode == EDIT){
+                    xc = SCREENSPACE_TO_FONTSPACE_X(x, GLYPHSTARTX_CENTER);
+                    yc = SCREENSPACE_TO_FONTSPACE_Y(y, GLYPHSTARTY_CENTER);
+                    if(xc >= 0 && xc <= GLYPHW &&
+                       yc >= 0 && yc <= GLYPHH) draw(xc, yc);
+                  }
+                  break;
+                case '#': /* Mouse up */
+                  mouse = 0;
+                  break;
+                case 'C': /* Mouse move */
+                case '@': /* FALL THROUGH */
+                  // notes:
+                  //  1. when mouse is pressed, x and y position are reported
+                  //  2. when mouse is moved (but not held), x and y position are reported
+                  //  3. when mouse is moved AND held, y position is only reported on horizontal movement
+                  //  4. all of this might be wrong because it gets reported a bit differently every time i run mouse.c
+                  //  5. what the fuck
+                  if(mouse){
+                    draw((buf[4] & 0xff) - 0x20, (buf[5] & 0xff) - 0x20);
+                  }
+                  break;
+                case 'a': /* Scroll down */
+                  if(mode == VIEW){
+                    viewmode_scroll += 2;
+                    paint();
+                  }
+                  break;
+                case '`': /* Scroll up */
+                  if(mode == VIEW && viewmode_scroll > 1){
+                    viewmode_scroll -= 2;
+                    paint();
+                  }
+                  break;
+              }
+              break;
+          }
+        } else {
+          if(mode == VIEW){
+            stop();
+          } else if(mode == EDIT){
+            mode = VIEW;
+            paint();
+          }
+        }
+        break;
+    }
+  }
+}
+
+void stop(){
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &tio);
+  printf("\x1b[2J\x1b[?1049l\x1b[?1003l\x1b[?25h");
+  ui_free();
+  exit(0);
+}
+
+int main(int argc, char **argv){
+  init();
+  loop();
+  stop();
+
+  return 0;
+}
